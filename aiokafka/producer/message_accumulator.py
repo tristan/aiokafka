@@ -250,20 +250,17 @@ class MessageAccumulator:
     def set_api_version(self, api_version):
         self._api_version = api_version
 
-    @asyncio.coroutine
-    def flush(self):
-        # NOTE: we copy to avoid mutation during `yield from` below
+    async def flush(self):
+        # NOTE: we copy to avoid mutation during `await` below
         for batches in list(self._batches.values()):
             for batch in list(batches):
-                yield from batch.wait_deliver()
+                await batch.wait_deliver()
 
-    @asyncio.coroutine
-    def close(self):
+    async def close(self):
         self._closed = True
-        yield from self.flush()
+        await self.flush()
 
-    @asyncio.coroutine
-    def add_message(self, tp, key, value, timeout, timestamp_ms=None):
+    async def add_message(self, tp, key, value, timeout, timestamp_ms=None):
         """ Add message to batch by topic-partition
         If batch is already full this method waits (`timeout` seconds maximum)
         until batch is drained by send task
@@ -285,11 +282,11 @@ class MessageAccumulator:
             # Batch is full, can't append data atm,
             # waiting until batch per topic-partition is drained
             start = self._loop.time()
-            yield from batch.wait_drain(timeout)
+            await batch.wait_drain(timeout)
             timeout -= self._loop.time() - start
             if timeout <= 0:
                 raise KafkaTimeoutError()
-            return (yield from self.add_message(
+            return (await self.add_message(
                 tp, key, value, timeout, timestamp_ms))
         return future
 
@@ -377,8 +374,7 @@ class MessageAccumulator:
             self._wait_data_future.set_result(None)
         return batch
 
-    @asyncio.coroutine
-    def add_batch(self, builder, tp, timeout):
+    async def add_batch(self, builder, tp, timeout):
         """Add BatchBuilder to queue by topic-partition.
 
         Arguments:
@@ -403,7 +399,7 @@ class MessageAccumulator:
         while timeout > 0:
             pending = self._batches.get(tp)
             if pending:
-                yield from pending[-1].wait_drain(timeout=timeout)
+                await pending[-1].wait_drain(timeout=timeout)
                 timeout -= self._loop.time() - start
             else:
                 batch = self._append_batch(builder, tp)

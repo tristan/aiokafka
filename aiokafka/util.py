@@ -26,7 +26,6 @@ def parse_kafka_version(api_version):
     return version
 
 
-PY_341 = sys.version_info >= (3, 4, 1)
 PY_35 = sys.version_info >= (3, 5)
 PY_352 = sys.version_info >= (3, 5, 2)
 PY_36 = sys.version_info >= (3, 6)

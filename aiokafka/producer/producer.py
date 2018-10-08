@@ -17,7 +17,7 @@ from aiokafka.protocol.produce import ProduceRequest
 from aiokafka.protocol.transaction import InitProducerIdRequest
 from aiokafka.record.legacy_records import LegacyRecordBatchBuilder
 from aiokafka.structs import TopicPartition
-from aiokafka.util import ensure_future, INTEGER_MAX_VALUE, PY_341, PY_36
+from aiokafka.util import ensure_future, INTEGER_MAX_VALUE, PY_36
 
 from .message_accumulator import MessageAccumulator
 from .transaction_manager import TransactionManager
@@ -244,29 +244,27 @@ class AIOKafkaProducer(object):
             self._source_traceback = traceback.extract_stack(sys._getframe(1))
         self._closed = False
 
-    if PY_341:
-        # Warn if producer was not closed properly
-        # We don't attempt to close the Consumer, as __del__ is synchronous
-        def __del__(self, _warnings=warnings):
-            if self._closed is False:
-                if PY_36:
-                    kwargs = {'source': self}
-                else:
-                    kwargs = {}
-                _warnings.warn("Unclosed AIOKafkaProducer {!r}".format(self),
-                               ResourceWarning,
-                               **kwargs)
-                context = {'producer': self,
-                           'message': 'Unclosed AIOKafkaProducer'}
-                if self._source_traceback is not None:
-                    context['source_traceback'] = self._source_traceback
-                self._loop.call_exception_handler(context)
+    # Warn if producer was not closed properly
+    # We don't attempt to close the Consumer, as __del__ is synchronous
+    def __del__(self, _warnings=warnings):
+        if self._closed is False:
+            if PY_36:
+                kwargs = {'source': self}
+            else:
+                kwargs = {}
+            _warnings.warn("Unclosed AIOKafkaProducer {!r}".format(self),
+                           ResourceWarning,
+                           **kwargs)
+            context = {'producer': self,
+                       'message': 'Unclosed AIOKafkaProducer'}
+            if self._source_traceback is not None:
+                context['source_traceback'] = self._source_traceback
+            self._loop.call_exception_handler(context)
 
-    @asyncio.coroutine
-    def start(self):
+    async def start(self):
         """Connect to Kafka cluster and check server version"""
         log.debug("Starting the Kafka producer")  # trace
-        yield from self.client.bootstrap()
+        await self.client.bootstrap()
 
         if self._compression_type == 'lz4':
             assert self.client.api_version >= (0, 8, 2), \
@@ -283,35 +281,31 @@ class AIOKafkaProducer(object):
         self._producer_magic = 0 if self.client.api_version < (0, 10) else 1
         log.debug("Kafka producer started")
 
-    @asyncio.coroutine
-    def flush(self):
+    async def flush(self):
         """Wait untill all batches are Delivered and futures resolved"""
-        yield from self._message_accumulator.flush()
+        await self._message_accumulator.flush()
 
-    @asyncio.coroutine
-    def stop(self):
+    async def stop(self):
         """Flush all pending data and close all connections to kafka cluster"""
         if self._closed:
             return
         self._closed = True
 
-        yield from self._message_accumulator.close()
+        await self._message_accumulator.close()
 
         if self._sender_task:
             self._sender_task.cancel()
-            yield from self._sender_task
+            await self._sender_task
 
-        yield from self.client.close()
+        await self.client.close()
         log.debug("The Kafka producer has closed.")
 
-    @asyncio.coroutine
-    def partitions_for(self, topic):
+    async def partitions_for(self, topic):
         """Returns set of all known partitions for the topic."""
-        return (yield from self.client._wait_on_metadata(topic))
+        return (await self.client._wait_on_metadata(topic))
 
-    @asyncio.coroutine
-    def send(self, topic, value=None, key=None, partition=None,
-             timestamp_ms=None):
+    async def send(self, topic, value=None, key=None, partition=None,
+                   timestamp_ms=None):
         """Publish a message to a topic.
 
         Arguments:
@@ -356,7 +350,7 @@ class AIOKafkaProducer(object):
             'Need at least one: key or value'
 
         # first make sure the metadata for the topic is available
-        yield from self.client._wait_on_metadata(topic)
+        await self.client._wait_on_metadata(topic)
 
         key_bytes, value_bytes = self._serialize(topic, key, value)
         partition = self._partition(topic, partition, key, value,
@@ -365,21 +359,19 @@ class AIOKafkaProducer(object):
         tp = TopicPartition(topic, partition)
         log.debug("Sending (key=%s value=%s) to %s", key, value, tp)
 
-        fut = yield from self._message_accumulator.add_message(
+        fut = await self._message_accumulator.add_message(
             tp, key_bytes, value_bytes, self._request_timeout_ms / 1000,
             timestamp_ms=timestamp_ms)
         return fut
 
-    @asyncio.coroutine
-    def send_and_wait(self, topic, value=None, key=None, partition=None,
-                      timestamp_ms=None):
+    async def send_and_wait(self, topic, value=None, key=None, partition=None,
+                            timestamp_ms=None):
         """Publish a message to a topic and wait the result"""
-        future = yield from self.send(
+        future = await self.send(
             topic, value, key, partition, timestamp_ms)
-        return (yield from future)
+        return (await future)
 
-    @asyncio.coroutine
-    def _sender_routine(self):
+    async def _sender_routine(self):
         """ Background task, that sends pending batches to leader nodes for
         batch's partition. This incapsulates same logic as Java's `Sender`
         background thread. Because we use asyncio this is more event based
@@ -401,7 +393,7 @@ class AIOKafkaProducer(object):
             while True:
                 # If indempotence or transactions are turned on we need to
                 # have a valid PID to send requests
-                yield from self._maybe_wait_for_pid()
+                await self._maybe_wait_for_pid()
 
                 batches, unknown_leaders_exist = \
                     self._message_accumulator.drain_by_nodes(
@@ -428,7 +420,7 @@ class AIOKafkaProducer(object):
                 # * At least one of produce task is finished
                 # * Data for new partition arrived
                 # * Metadata update if partition leader unknown
-                done, _ = yield from asyncio.wait(
+                done, _ = await asyncio.wait(
                     waiters,
                     return_when=asyncio.FIRST_COMPLETED,
                     loop=self._loop)
@@ -443,32 +435,30 @@ class AIOKafkaProducer(object):
         except asyncio.CancelledError:
             # done tasks should never produce errors, if they are it's a bug
             for task in tasks:
-                yield from task
+                await task
         except Exception:  # pragma: no cover
             log.error("Unexpected error in sender routine", exc_info=True)
 
-    @asyncio.coroutine
-    def _maybe_wait_for_pid(self):
+    async def _maybe_wait_for_pid(self):
         if self._txn_manager is None or self._txn_manager.has_pid():
             return
 
         while True:
-            success = yield from self._do_init_pid()
+            success = await self._do_init_pid()
             if not success:
-                yield from self.force_metadata_update()
-                yield from asyncio.sleep(self._retry_backoff, loop=self._loop)
+                await self.force_metadata_update()
+                await asyncio.sleep(self._retry_backoff, loop=self._loop)
             else:
                 break
 
-    @asyncio.coroutine
-    def _do_init_pid(self):
+    async def _do_init_pid(self):
         init_pid_req = InitProducerIdRequest[0](
             transactional_id=self._transactional_id,
             transaction_timeout_ms=self._transaction_timeout_ms)
 
         node_id = self.client.get_random_node()
         try:
-            resp = yield from self.client.send(node_id, init_pid_req)
+            resp = await self.client.send(node_id, init_pid_req)
         except KafkaError as err:
             log.debug("Could not send InitProducerIdRequest: %r", err)
             return False
@@ -483,8 +473,7 @@ class AIOKafkaProducer(object):
             log.debug("Got an error for InitProducerIdRequest: %r", error)
             return False
 
-    @asyncio.coroutine
-    def _send_produce_req(self, node_id, batches):
+    async def _send_produce_req(self, node_id, batches):
         """ Create produce request to node
         If producer configured with `retries`>0 and produce response contain
         "failed" partitions produce request for this partition will try
@@ -523,7 +512,7 @@ class AIOKafkaProducer(object):
 
         reenqueue = []
         try:
-            response = yield from self.client.send(node_id, request)
+            response = await self.client.send(node_id, request)
         except KafkaError as err:
             log.warning(
                 "Got error produce response: %s", err)
@@ -571,19 +560,19 @@ class AIOKafkaProducer(object):
 
         if reenqueue:
             # Wait backoff before reequeue
-            yield from asyncio.sleep(self._retry_backoff, loop=self._loop)
+            await asyncio.sleep(self._retry_backoff, loop=self._loop)
 
             for batch in reenqueue:
                 self._message_accumulator.reenqueue(batch)
             # If some error started metadata refresh we have to wait before
             # trying again
-            yield from self.client._maybe_wait_metadata()
+            await self.client._maybe_wait_metadata()
 
         # if batches for node is processed in less than a linger seconds
         # then waiting for the remaining time
         sleep_time = self._linger_time - (self._loop.time() - t0)
         if sleep_time > 0:
-            yield from asyncio.sleep(sleep_time, loop=self._loop)
+            await asyncio.sleep(sleep_time, loop=self._loop)
 
         self._in_flight.remove(node_id)
 
@@ -647,8 +636,7 @@ class AIOKafkaProducer(object):
         """
         return self._message_accumulator.create_builder()
 
-    @asyncio.coroutine
-    def send_batch(self, batch, topic, *, partition):
+    async def send_batch(self, batch, topic, *, partition):
         """Submit a BatchBuilder for publication.
 
         Arguments:
@@ -663,6 +651,6 @@ class AIOKafkaProducer(object):
         partition = self._partition(topic, partition, None, None, None, None)
         tp = TopicPartition(topic, partition)
         log.debug("Sending batch to %s", tp)
-        future = yield from self._message_accumulator.add_batch(
+        future = await self._message_accumulator.add_batch(
             batch, tp, self._request_timeout_ms / 1000)
         return future

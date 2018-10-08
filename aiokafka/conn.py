@@ -12,7 +12,7 @@ from kafka.protocol.commit import (
     GroupCoordinatorResponse_v0 as GroupCoordinatorResponse)
 
 import aiokafka.errors as Errors
-from aiokafka.util import ensure_future, create_future, PY_341, PY_36
+from aiokafka.util import ensure_future, create_future, PY_36
 
 __all__ = ['AIOKafkaConnection', 'create_conn']
 
@@ -29,11 +29,10 @@ class CloseReason:
     SHUTDOWN = 4
 
 
-@asyncio.coroutine
-def create_conn(host, port, *, loop=None, client_id='aiokafka',
-                request_timeout_ms=40000, api_version=(0, 8, 2),
-                ssl_context=None, security_protocol="PLAINTEXT",
-                max_idle_ms=None, on_close=None):
+async def create_conn(host, port, *, loop=None, client_id='aiokafka',
+                      request_timeout_ms=40000, api_version=(0, 8, 2),
+                      ssl_context=None, security_protocol="PLAINTEXT",
+                      max_idle_ms=None, on_close=None):
     if loop is None:
         loop = asyncio.get_event_loop()
     conn = AIOKafkaConnection(
@@ -42,7 +41,7 @@ def create_conn(host, port, *, loop=None, client_id='aiokafka',
         api_version=api_version,
         ssl_context=ssl_context, security_protocol=security_protocol,
         max_idle_ms=max_idle_ms, on_close=on_close)
-    yield from conn.connect()
+    await conn.connect()
     return conn
 
 
@@ -94,34 +93,32 @@ class AIOKafkaConnection:
         if loop.get_debug():
             self._source_traceback = traceback.extract_stack(sys._getframe(1))
 
-    if PY_341:
-        # Warn and try to close. We can close synchroniously, so will attempt
-        # that
-        def __del__(self, _warnings=warnings):
-            if self.connected():
-                if PY_36:
-                    kwargs = {'source': self}
-                else:
-                    kwargs = {}
-                _warnings.warn("Unclosed AIOKafkaConnection {!r}".format(self),
-                               ResourceWarning,
-                               **kwargs)
-                if self._loop.is_closed():
-                    return
+    # Warn and try to close. We can close synchroniously, so will attempt
+    # that
+    def __del__(self, _warnings=warnings):
+        if self.connected():
+            if PY_36:
+                kwargs = {'source': self}
+            else:
+                kwargs = {}
+            _warnings.warn("Unclosed AIOKafkaConnection {!r}".format(self),
+                           ResourceWarning,
+                           **kwargs)
+            if self._loop.is_closed():
+                return
 
-                # We don't need to call callback in this case. Just release
-                # sockets and stop connections.
-                self._on_close_cb = None
-                self.close()
+            # We don't need to call callback in this case. Just release
+            # sockets and stop connections.
+            self._on_close_cb = None
+            self.close()
 
-                context = {'conn': self,
-                           'message': 'Unclosed AIOKafkaConnection'}
-                if self._source_traceback is not None:
-                    context['source_traceback'] = self._source_traceback
-                self._loop.call_exception_handler(context)
+            context = {'conn': self,
+                       'message': 'Unclosed AIOKafkaConnection'}
+            if self._source_traceback is not None:
+                context['source_traceback'] = self._source_traceback
+            self._loop.call_exception_handler(context)
 
-    @asyncio.coroutine
-    def connect(self):
+    async def connect(self):
         loop = self._loop
         self._closed_fut = create_future(loop=loop)
         if self._secutity_protocol == "PLAINTEXT":
@@ -133,7 +130,7 @@ class AIOKafkaConnection:
         # Create streams same as `open_connection`, but using custom protocol
         reader = asyncio.StreamReader(limit=READER_LIMIT, loop=loop)
         protocol = AIOKafkaProtocol(self._closed_fut, reader, loop=loop)
-        transport, _ = yield from asyncio.wait_for(
+        transport, _ = await asyncio.wait_for(
             loop.create_connection(
                 lambda: protocol, self.host, self.port, ssl=ssl),
             loop=loop, timeout=self._request_timeout)
@@ -257,8 +254,7 @@ class AIOKafkaConnection:
         return read_task
 
     @classmethod
-    @asyncio.coroutine
-    def _read(cls, self_ref):
+    async def _read(cls, self_ref):
         # XXX: I know that it become a bit more ugly once cyclic references
         # were removed, but it's needed to allow connections to properly
         # release resources if leaked.
@@ -266,10 +262,10 @@ class AIOKafkaConnection:
 
         reader = self_ref()._reader
         while True:
-            resp = yield from reader.readexactly(4)
+            resp = await reader.readexactly(4)
             size, = struct.unpack(">i", resp)
 
-            resp = yield from reader.readexactly(size)
+            resp = await reader.readexactly(size)
             self_ref()._handle_frame(resp)
 
     def _handle_frame(self, resp):
